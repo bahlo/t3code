@@ -1,9 +1,11 @@
-import * as NodeNet from "node:net";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import type * as Exit from "effect/Exit";
 import * as ExitRuntime from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Tracer from "effect/Tracer";
 import { OtlpResource, OtlpTracer } from "effect/unstable/observability";
 
@@ -685,33 +687,50 @@ function parseBigInt(input: string): bigint {
   }
 }
 
-const isLoopbackHost = (hostname: string) => {
-  if (hostname === "localhost" || hostname === "[::1]") {
-    return true;
-  }
-
-  // match only 127.0.0.0/8, not any host that starts with 127.
-  return NodeNet.isIPv4(hostname) && hostname.startsWith("127.");
-};
-
-export const otlpHeadersTransportIssue = (
-  headers: Readonly<Record<string, string>> | undefined,
-  urls: ReadonlyArray<string | undefined>,
-): string | undefined => {
-  if (!headers) {
-    return undefined;
-  }
-
-  for (const rawUrl of urls) {
-    if (!rawUrl) {
-      continue;
-    }
-
-    const url = new URL(rawUrl);
-    if (url.protocol === "http:" && !isLoopbackHost(url.hostname)) {
-      return `T3CODE_OTLP_HEADERS would be sent in plaintext to ${url.origin}. Use an https:// or a loopback http:// endpoint.`;
-    }
-  }
-
-  return undefined;
-};
+/**
+ * Parses the `OTEL_EXPORTER_OTLP_HEADERS` wire format used by
+ * `T3CODE_OTLP_HEADERS`: W3C Baggage `key=value` pairs joined by commas, with
+ * percent-encoded values. Each pair splits at its first `=` so an encoded or
+ * literal `=` inside a value survives, and whitespace around the separators is
+ * ignored.
+ */
+export const OtlpHeadersFromString = Schema.String.pipe(
+  Schema.decodeTo(
+    Schema.Record(Schema.String, Schema.String),
+    SchemaTransformation.transformOrFail({
+      decode: (input) => {
+        const headers: Record<string, string> = {};
+        for (const pair of input.split(",")) {
+          if (pair.trim() === "") {
+            continue;
+          }
+          const separator = pair.indexOf("=");
+          const key = separator === -1 ? "" : pair.slice(0, separator).trim();
+          if (key === "") {
+            return Effect.fail(
+              new SchemaIssue.InvalidValue({
+                message: `Expected key=value but received ${JSON.stringify(pair.trim())}.`,
+              }),
+            );
+          }
+          try {
+            headers[key] = decodeURIComponent(pair.slice(separator + 1).trim());
+          } catch {
+            return Effect.fail(
+              new SchemaIssue.InvalidValue({
+                message: `Header ${JSON.stringify(key)} has a malformed percent-encoded value.`,
+              }),
+            );
+          }
+        }
+        return Effect.succeed(headers);
+      },
+      encode: (headers) =>
+        Effect.succeed(
+          Object.entries(headers)
+            .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+            .join(","),
+        ),
+    }),
+  ),
+);

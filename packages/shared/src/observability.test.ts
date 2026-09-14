@@ -21,8 +21,8 @@ import {
   makeTraceSink,
   type TraceRecord,
   type TraceSinkFlushStats,
+  OtlpHeadersFromString,
   truncateTraceAttributes,
-  otlpHeadersTransportIssue,
 } from "./observability.ts";
 
 describe("errorTag", () => {
@@ -461,45 +461,39 @@ describe("observability", () => {
   });
 });
 
-describe("otlpHeadersTransportIssue", () => {
-  const headers = { authorization: "Bearer my-token" };
+describe("OtlpHeadersFromString", () => {
+  const decode = Schema.decodeUnknownSync(OtlpHeadersFromString);
 
-  it("allows https endpoints", () => {
-    expect(
-      otlpHeadersTransportIssue(headers, ["https://api.example.com/v1/traces", undefined]),
-    ).toBeUndefined();
+  it.each([
+    {
+      name: "decodes percent-encoded values",
+      input: "authorization=Basic%20abc%3D%3D,x-tenant=t3",
+      expected: { authorization: "Basic abc==", "x-tenant": "t3" },
+    },
+    {
+      name: "ignores whitespace around separators",
+      input: "authorization=Basic%20abc%3D%3D, x-tenant = t3 ,",
+      expected: { authorization: "Basic abc==", "x-tenant": "t3" },
+    },
+    {
+      name: "keeps literal equals signs inside a value",
+      input: "authorization=Bearer abc==",
+      expected: { authorization: "Bearer abc==" },
+    },
+    {
+      name: "keeps an empty value",
+      input: "x-empty=",
+      expected: { "x-empty": "" },
+    },
+  ])("$name", ({ input, expected }) => {
+    expect(decode(input)).toEqual(expected);
   });
 
-  it("allows loopback http endpoints", () => {
-    expect(
-      otlpHeadersTransportIssue(headers, [
-        "http://localhost:4318/v1/traces",
-        "http://127.0.0.1:4318/v1/traces",
-        "http://127.0.0.2:4318/v1/traces",
-        "http://127.255.255.255:4318/v1/traces",
-        "http://[::1]:4318/v1/metrics",
-      ]),
-    ).toBeUndefined();
-  });
-
-  it("refuses a plaintext non-loopback endpoint even when another is https", () => {
-    expect(
-      otlpHeadersTransportIssue(headers, [
-        "https://api.example.com/v1/traces",
-        "http://collector.internal:4318/v1/metrics",
-      ]),
-    ).toContain("http://collector.internal:4318");
-  });
-
-  it("ignores endpoints when no headers are configured", () => {
-    expect(
-      otlpHeadersTransportIssue(undefined, ["http://collector.internal:4318/v1/traces"]),
-    ).toBeUndefined();
-  });
-
-  it("refuses a DNS name that merely starts with 127.", () => {
-    expect(
-      otlpHeadersTransportIssue(headers, ["http://127.attacker.example:4318/v1/traces"]),
-    ).toContain("http://127.attacker.example:4318");
+  it.each([
+    { name: "rejects a pair without a separator", input: "authorization" },
+    { name: "rejects a pair without a key", input: "=value" },
+    { name: "rejects a malformed percent-encoding", input: "authorization=%E0" },
+  ])("$name", ({ input }) => {
+    expect(() => decode(input)).toThrow();
   });
 });
